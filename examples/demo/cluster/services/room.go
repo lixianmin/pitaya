@@ -72,8 +72,12 @@ func NewRoom() *Room {
 
 // Init runs on service initialization
 func (r *Room) Init() {
+	// MemoryGroupService是线程安全的
 	gsi := groups.NewMemoryGroupService(config.NewConfig())
 	pitaya.InitGroups(gsi)
+
+	// GroupCreate()放到哪里都没有问题，但是，InitGroups()因为全局只有一个，
+	// 这个最好别放在Room这种地方初始化
 	pitaya.GroupCreate(context.Background(), "room")
 }
 
