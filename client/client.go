@@ -73,10 +73,10 @@ type Client struct {
 	IncomingMsgChan     chan *message.Message
 	pendingChan         chan bool
 	pendingRequests     map[uint]*pendingRequest
-	pendingReqMutex     sync.Mutex
-	requestTimeout      time.Duration
-	closeChan           chan struct{}
-	nextID              uint32
+	pendingReqMutex     sync.Mutex    // 监控pendingRequests
+	requestTimeout      time.Duration // 默认5s，抛弃超时的请求
+	closeChan           chan struct{} // 这个closeChan，原理跟我的WaitDispose一模一样，用于控制对象的协程退出
+	nextID              uint32        // 用于生成Message的ID，因此每个client使用一个各自的ID序列
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
 }
@@ -92,6 +92,7 @@ func (c *Client) ConnectedStatus() bool {
 }
 
 // New returns a new client
+// piata里经常使用『可变参数』实现默认参数，这种方法的优点是调用时可以不填，缺点是很难扩展第二个可选参数
 func New(logLevel logrus.Level, requestTimeout ...time.Duration) *Client {
 	l := logrus.New()
 	l.Formatter = &logrus.TextFormatter{}
@@ -111,7 +112,7 @@ func New(logLevel logrus.Level, requestTimeout ...time.Duration) *Client {
 		packetChan:      make(chan *packet.Packet, 10),
 		pendingRequests: make(map[uint]*pendingRequest),
 		requestTimeout:  reqTimeout,
-		// 30 here is the limit of inflight messages
+		// 30 here is the limit of inflight（飞行中的） messages
 		// TODO this should probably be configurable
 		pendingChan:    make(chan bool, 30),
 		messageEncoder: message.NewMessagesEncoder(false),
@@ -199,6 +200,7 @@ func (c *Client) handleHandshakeResponse() error {
 }
 
 // pendingRequestsReaper delete timedout requests
+// reaper：收割机
 func (c *Client) pendingRequestsReaper() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -234,6 +236,7 @@ func (c *Client) pendingRequestsReaper() {
 	}
 }
 
+// 处理从网络上收到的packet包
 func (c *Client) handlePackets() {
 	for {
 		select {
@@ -294,9 +297,13 @@ func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
 	return packets, nil
 }
 
+// 将接收到的网络包通过c.packetChan中转到另一个协程中，讲道理也没有搞明白是为了什么？
+// 个人认为网络收发各自使用一个协程已经够奢侈了
 func (c *Client) handleServerMessages() {
+	// bytes.NewBuffer()这个东西，很像是其它语言中的StringBuilder
 	buf := bytes.NewBuffer(nil)
 	defer c.Disconnect()
+	//这个协程通过c.Connected，而不是closeChan来控制退出
 	for c.Connected {
 		packets, err := c.readPackets(buf)
 		if err != nil && c.Connected {
@@ -310,6 +317,13 @@ func (c *Client) handleServerMessages() {
 	}
 }
 
+// sendHeartBeats()设计为一个单独的协程
+// 优点是：
+// 1. 延迟有可能会低。但是大家都是通过c.conn.Write()写出，因此这个还真不好说
+// 2. 代码逻辑相对集中
+//
+// 缺点是：
+// 1. 多了一个协程，占用更多的系统资源
 func (c *Client) sendHeartbeats(interval int) {
 	t := time.NewTicker(time.Duration(interval) * time.Second)
 	defer func() {
@@ -435,7 +449,8 @@ func (c *Client) buildPacket(msg message.Message) ([]byte, error) {
 func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint, error) {
 	// TODO mount msg and encode
 	m := message.Message{
-		Type:  msgType,
+		Type: msgType,
+		//每一个消息都自带一个消息ID
 		ID:    uint(atomic.AddUint32(&c.nextID, 1)),
 		Route: route,
 		Data:  data,
@@ -445,6 +460,7 @@ func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint,
 	if msgType == message.Request {
 		c.pendingChan <- true
 		c.pendingReqMutex.Lock()
+		//如果是异步处理的话，通过这个消息可以找到原始的消息，这听起来非常像秒杀活动中异步处理http请求的方案
 		if _, ok := c.pendingRequests[m.ID]; !ok {
 			c.pendingRequests[m.ID] = &pendingRequest{
 				msg:    &m,

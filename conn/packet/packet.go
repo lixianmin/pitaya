@@ -25,6 +25,8 @@ import (
 )
 
 // Packet represents a network packet.
+// pitaya的Packet的概念很有意思，框架层需要处理的类型都通过Type表示，包括Handshake, HeartBeat等，
+// 而所有的业务层数据的Type都是Data，并在client中decode成message后处理
 type Packet struct {
 	Type   Type
 	Length int
