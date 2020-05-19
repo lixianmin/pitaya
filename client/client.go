@@ -69,14 +69,14 @@ type Client struct {
 	Connected           bool
 	packetEncoder       codec.PacketEncoder
 	packetDecoder       codec.PacketDecoder
-	packetChan          chan *packet.Packet
-	IncomingMsgChan     chan *message.Message
-	pendingChan         chan bool
-	pendingRequests     map[uint]*pendingRequest
-	pendingReqMutex     sync.Mutex    // 监控pendingRequests
-	requestTimeout      time.Duration // 默认5s，抛弃超时的请求
-	closeChan           chan struct{} // 这个closeChan，原理跟我的WaitDispose一模一样，用于控制对象的协程退出
-	nextID              uint32        // 用于生成Message的ID，因此每个client使用一个各自的ID序列
+	packetChan          chan *packet.Packet      // 所有从server端收到的packet，都先放到packetChan中
+	IncomingMsgChan     chan *message.Message    // 这里的msg分两部分：1 正常收到server端的response的message；2 超时的message
+	pendingChan         chan bool                // 控制发送速度
+	pendingRequests     map[uint]*pendingRequest // 发请求到sever，并等待处理结果的request
+	pendingReqMutex     sync.Mutex               // 监控pendingRequests
+	requestTimeout      time.Duration            // 默认5s，抛弃超时的请求
+	closeChan           chan struct{}            // 这个closeChan，原理跟我的WaitDispose一模一样，用于控制对象的协程退出
+	nextID              uint32                   // 用于生成Message的ID，因此每个client使用一个各自的ID序列
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
 }
@@ -227,6 +227,7 @@ func (c *Client) pendingRequestsReaper() {
 				}
 				delete(c.pendingRequests, pendingReq.msg.ID)
 				<-c.pendingChan
+				// 每秒检测超时的请求，将它们从pendingRequests中移除，伪装成Message放到IncomingMsgChan中
 				c.IncomingMsgChan <- m
 			}
 			c.pendingReqMutex.Unlock()
@@ -260,6 +261,7 @@ func (c *Client) handlePackets() {
 					}
 					c.pendingReqMutex.Unlock()
 				}
+				// 已经超时的response直接扔掉，有效的response放到IncomingMsgChan中
 				c.IncomingMsgChan <- m
 			case packet.Kick:
 				logger.Log.Warn("got kick packet from the server! disconnecting...")
